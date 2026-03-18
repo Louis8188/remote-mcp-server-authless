@@ -22,16 +22,21 @@ async function saveToNotion(rawText: string): Promise<boolean> {
   return res.ok;
 }
 
-async function getNotionEntries(): Promise<{raw: string}[]> {
+async function getNotionEntries(): Promise<string[]> {
   const res = await fetch('https://api.notion.com/v1/databases/' + NOTION_DB + '/query', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + NOTION_TOKEN, 'Content-Type': 'application/json', 'Notion-Version': '2022-06-28' },
     body: JSON.stringify({ page_size: 100 })
   });
   const data: any = await res.json();
-  return (data.results || []).map((p: any) => ({
-    raw: p.properties['Raw input']?.rich_text?.[0]?.text?.content || p.properties['Title']?.title?.[0]?.text?.content || ''
-  }));
+  if (!data.results) return [];
+  return data.results
+    .map((p: any) => {
+      const raw = p.properties?.['Raw input']?.rich_text?.[0]?.text?.content;
+      const title = p.properties?.['Title']?.title?.[0]?.text?.content;
+      return raw || title || '';
+    })
+    .filter((s: string) => s.length > 0);
 }
 
 export class MyMCP extends McpAgent {
@@ -51,20 +56,46 @@ export class MyMCP extends McpAgent {
       "search_resources",
       { query: z.string().describe("The search query or question, in any language.") },
       async ({ query }) => {
-        const entries = await getNotionEntries();
-        if (!entries.length) return { content: [{ type: "text", text: "No resources saved yet." }] };
-        const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-          body: JSON.stringify({
-            model: 'claude-haiku-4-5-20251001',
-            max_tokens: 1000,
-            system: 'You are a multilingual knowledge assistant. Search all entries regardless of language. Reply in the same language as the query. Return the most relevant entries including their full original text.',
-            messages: [{ role: 'user', content: 'Query: ' + query + '\n\nEntries:\n' + entries.map((e,i) => i+'. '+e.raw).join('\n') }]
-          })
-        });
-        const aiData: any = await aiRes.json();
-        return { content: [{ type: "text", text: aiData.content?.[0]?.text || 'No results found.' }] };
+        try {
+          const entries = await getNotionEntries();
+          if (!entries.length) {
+            return { content: [{ type: "text", text: "No resources saved yet in your Resource Brain." }] };
+          }
+
+          const entriesText = entries.map((e, i) => `[${i + 1}] ${e}`).join('\n\n');
+
+          const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': ANTHROPIC_KEY,
+              'anthropic-version': '2023-06-01'
+            },
+            body: JSON.stringify({
+              model: 'claude-haiku-4-5-20251001',
+              max_tokens: 2000,
+              messages: [{
+                role: 'user',
+                content: `You are a multilingual knowledge assistant. The user has these saved resource notes:\n\n${entriesText}\n\nUser query: ${query}\n\nFind all relevant entries. Reply in the same language as the query. For each match, show the full original text. If nothing matches, say so clearly.`
+              }]
+            })
+          });
+
+          const aiData: any = await aiRes.json();
+          const answer = aiData?.content?.[0]?.text;
+
+          if (!answer) {
+            // Fallback: simple keyword search if AI fails
+            const lowerQuery = query.toLowerCase();
+            const matches = entries.filter(e => e.toLowerCase().includes(lowerQuery));
+            if (matches.length === 0) return { content: [{ type: "text", text: `No entries found matching "${query}". Total entries: ${entries.length}.` }] };
+            return { content: [{ type: "text", text: `Found ${matches.length} matching entries:\n\n${matches.join('\n\n---\n\n')}` }] };
+          }
+
+          return { content: [{ type: "text", text: answer }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Search error: ${e.message}` }] };
+        }
       }
     );
   }
