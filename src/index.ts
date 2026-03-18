@@ -42,7 +42,7 @@ export class MyMCP extends McpAgent {
       "save_resource",
       { raw_text: z.string().describe("The exact text to save verbatim, in the user's original language. Never modify or summarize.") },
       async ({ raw_text }) => {
-        const ok = await saveToNotion(raw_text);
+        const ok = await saveToNotion('[Claude chat] ' + raw_text);
         return { content: [{ type: "text", text: ok ? "✓ Saved to your Resource Brain." : "⚠ Save failed — check Notion connection." }] };
       }
     );
