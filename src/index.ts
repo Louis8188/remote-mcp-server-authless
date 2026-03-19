@@ -4,7 +4,6 @@ import { z } from "zod";
 
 const NOTION_TOKEN = 'ntn_b12552877176FqqJMCSt6hyUCkofPU5McVESYo0zeC2fTb';
 const NOTION_DB = '32504ad22ba580639c91c481bc05548e';
-const ANTHROPIC_KEY = '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';
 
 async function saveToNotion(rawText: string): Promise<boolean> {
   const title = rawText.length > 100 ? rawText.slice(0, 100) + '...' : rawText;
@@ -30,13 +29,11 @@ async function getNotionEntries(): Promise<string[]> {
   });
   const data: any = await res.json();
   if (!data.results) return [];
-  return data.results
-    .map((p: any) => {
-      const raw = p.properties?.['Raw input']?.rich_text?.[0]?.text?.content;
-      const title = p.properties?.['Title']?.title?.[0]?.text?.content;
-      return raw || title || '';
-    })
-    .filter((s: string) => s.length > 0);
+  return data.results.map((p: any) => {
+    const raw = p.properties?.['Raw input']?.rich_text?.[0]?.text?.content || '';
+    const title = p.properties?.['Title']?.title?.[0]?.text?.content || '';
+    return raw || title;
+  }).filter((s: string) => s.length > 0);
 }
 
 export class MyMCP extends McpAgent {
@@ -45,55 +42,37 @@ export class MyMCP extends McpAgent {
   async init() {
     this.server.tool(
       "save_resource",
-      { raw_text: z.string().describe("The exact text to save verbatim, in the user's original language. Never modify or summarize.") },
+      { raw_text: z.string().describe("The exact text to save verbatim in the user's original language. Never modify or summarize.") },
       async ({ raw_text }) => {
         const ok = await saveToNotion('[Claude chat] ' + raw_text);
-        return { content: [{ type: "text", text: ok ? "✓ Saved to your Resource Brain." : "⚠ Save failed — check Notion connection." }] };
+        return { content: [{ type: "text", text: ok ? "✓ Saved to your Resource Brain." : "⚠ Save failed." }] };
       }
     );
 
     this.server.tool(
       "search_resources",
-      { query: z.string().describe("The search query or question, in any language.") },
+      { query: z.string().describe("Search query in any language.") },
       async ({ query }) => {
         try {
           const entries = await getNotionEntries();
-          if (!entries.length) {
-            return { content: [{ type: "text", text: "No resources saved yet in your Resource Brain." }] };
+          if (!entries.length) return { content: [{ type: "text", text: "No resources saved yet." }] };
+
+          // Simple keyword search across all entries
+          const q = query.toLowerCase();
+          const words = q.split(/\s+/).filter(w => w.length > 1);
+          
+          const scored = entries.map(e => ({
+            text: e,
+            score: words.filter(w => e.toLowerCase().includes(w)).length
+          })).filter(r => r.score > 0).sort((a, b) => b.score - a.score);
+
+          if (!scored.length) {
+            return { content: [{ type: "text", text: `No entries found matching "${query}". You have ${entries.length} saved entries total.` }] };
           }
 
-          const entriesText = entries.map((e, i) => `[${i + 1}] ${e}`).join('\n\n');
-
-          const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': ANTHROPIC_KEY,
-              'anthropic-version': '2023-06-01'
-            },
-            body: JSON.stringify({
-              model: 'claude-haiku-4-5-20251001',
-              max_tokens: 2000,
-              messages: [{
-                role: 'user',
-                content: `You are a multilingual knowledge assistant. The user has these saved resource notes:\n\n${entriesText}\n\nUser query: ${query}\n\nFind all relevant entries. Reply in the same language as the query. For each match, show the full original text. If nothing matches, say so clearly.`
-              }]
-            })
-          });
-
-          const aiData: any = await aiRes.json();
-          const answer = aiData?.content?.[0]?.text;
-
-          if (!answer) {
-            // Fallback: simple keyword search if AI fails
-            const lowerQuery = query.toLowerCase();
-            const matches = entries.filter(e => e.toLowerCase().includes(lowerQuery));
-            if (matches.length === 0) return { content: [{ type: "text", text: `No entries found matching "${query}". Total entries: ${entries.length}.` }] };
-            return { content: [{ type: "text", text: `Found ${matches.length} matching entries:\n\n${matches.join('\n\n---\n\n')}` }] };
-          }
-
-          return { content: [{ type: "text", text: answer }] };
-        } catch (e: any) {
+          const results = scored.slice(0, 5).map((r, i) => `[${i+1}] ${r.text}`).join('\n\n---\n\n');
+          return { content: [{ type: "text", text: `Found ${scored.length} matching entries:\n\n${results}` }] };
+        } catch(e: any) {
           return { content: [{ type: "text", text: `Search error: ${e.message}` }] };
         }
       }
